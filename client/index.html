@@ -1,0 +1,358 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+	<title>Xibo browser client</title>
+	<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1" />
+	<meta name="script" http-equiv="Content-Script-Type" content="text/javascript" />
+	<meta name="script" http-equiv="Content-Style-Type" content="text/css" />
+	<script type="text/javascript" src="js/soapclient.js"></script>
+	<script type="text/javascript" src="js/json2.js"></script>
+	<script type="text/javascript" src="js/jquery-1.10.2.js"></script>
+	<script type="text/javascript" src="js/jstorage.js"></script>
+	<script type="text/javascript" src="js/md5.js"></script>
+
+	<script type="text/javascript">
+	
+	var url = "http://localhost/xibo/xmds.php"
+	var files = [];
+	var serverKey = "MyServerKey";
+	var hardwareKey =  "myWebClient";
+	var XMDSversion = 3;
+	var displayName = "DebugScreen";	
+	var currentFile;
+	var defaultLayout;
+	var layouts;
+	var renderTimers = [];
+	var renderMedia = [];
+	var renderMediaItem = [];
+	
+	function htmlDecode(input)
+	{
+		var e = document.createElement('div');
+		e.innerHTML = input;
+		return e.childNodes.length === 0 ? "" : e.childNodes[0].nodeValue;
+	}
+
+	function RegisterDisplay()
+	{
+		var pl = new SOAPClientParameters();
+		pl.add("serverKey", serverKey);
+		pl.add("hardwareKey", hardwareKey);
+		pl.add("version", XMDSversion);
+		pl.add("displayName", displayName);
+ 		SOAPClient.invoke(url, "RegisterDisplay", pl, true, RegisterDisplay_callBack);
+		document.getElementById("xiboStatus").innerHTML = "Scherm registratie";
+	}
+	function RegisterDisplay_callBack(r, a)
+	{
+		var result = a.getElementsByTagName("ActivationMessage")[0].innerHTML;
+		document.getElementById("xiboStatus").innerHTML  = result;
+		console.log("RegisterDisplay: "+result);
+		if (result == "Display is active and ready to start.")
+		{
+			LoadContent();
+		}
+		else {
+			setTimeout(RegisterDisplay,15000);
+		}
+	}
+
+	function LoadContent()
+	{
+		document.getElementById("xiboStatus").innerHTML  = "Data lijst ophalen";
+
+		var pl = new SOAPClientParameters();
+	        pl.add("serverKey", serverKey);
+                pl.add("hardwareKey", hardwareKey);
+                pl.add("version", XMDSversion);
+		SOAPClient.invoke(url, "requiredFiles", pl, true, LoadContent_callBack);
+	}
+
+	LoadContent_callBack = function (r, a)
+	{
+		console.log("Received file list.");
+		document.getElementById("xiboStatus").innerHTML  = "Data lijst verwerken";
+		var result = a.getElementsByTagName("RequiredFilesXml")[0].innerHTML;
+		result = htmlDecode(result);
+		localStorage.setItem("RequiredFiles", result);
+	
+		var parser = new DOMParser();
+		var xmlDoc = parser.parseFromString(result,"text/xml");
+		var fileList = 	xmlDoc.getElementsByTagName("file")
+		
+		for (index = 0; index < fileList.length; ++index) // > nano fix
+		{
+			var fileData = fileList[index];
+			var fileType = fileData.getAttribute("type");
+			var filePath = fileData.getAttribute("path");
+			var fileSize = fileData.getAttribute("size");
+			var fileChecksum = fileData.getAttribute("md5");
+			var fileID = files.length;
+			files[fileID] = [];
+			files[fileID]["fileType"] = fileType;
+			files[fileID]["filePath"] = filePath;
+			files[fileID]["fileSize"] = fileSize;
+			files[fileID]["fileChecksum"] = fileChecksum;
+ 			var fileName = fileType+"/"+filePath;
+			if (fileType != "blacklist")
+			{	
+				if (fileType == "layout" || localStorage.getItem(fileName)==null)
+					DownloadFile(fileType, filePath, fileSize, fileID);
+			}
+		}
+		console.log("Finished file list.");
+		FetchSchedule();
+	}
+
+	DownloadFile = function (fileType, filePath, fileSize, fileID)
+	{
+		console.log("[download] "+fileType+"/"+filePath+" Length:"+fileSize+" ID:"+fileID);
+		var pl = new SOAPClientParameters();
+                pl.add("serverKey", serverKey);
+                pl.add("hardwareKey", hardwareKey);
+                pl.add("version", XMDSversion);
+		pl.add("filePath", filePath);
+		pl.add("fileType", fileType);
+		pl.add("chuckOffset", 0);
+		pl.add("chuckSize", fileSize);
+                currentFile = fileID;
+		
+		// check if file exists
+
+		SOAPClient.invoke(url, "GetFile", pl, false, DownloadFile_callBack); // not async, else we can't get track which file is what :(
+	}
+
+	DownloadFile_callBack = function (r, a)
+	{
+		console.log("[download] Stored ID "+currentFile);
+		var result = a.getElementsByTagName("file")[0].innerHTML;
+
+		var fileName = files[currentFile]["fileType"]+"/"+files[currentFile]["filePath"];
+		var decodedMD5check =  calcMD5(atob(result)); // strip base64
+		if (decodedMD5check != files[currentFile]["fileChecksum"])
+			console.log("MD5 MISMATCH. Server:"+files[currentFile]["fileChecksum"]+" Client:"+decodedMD5check);
+
+		if (files[currentFile]["fileType"] == "layout")
+			result = atob(result); // strip base64
+		localStorage.setItem(fileName, result);
+		//document.write("<img src='data:image/jpeg;base64,"+localStorage.getItem(fileName)+"' />"); 
+	}
+
+	FetchSchedule = function()
+	{
+		console.log("Fetching Schedule");
+                var pl = new SOAPClientParameters();
+                pl.add("serverKey", serverKey);
+                pl.add("hardwareKey", hardwareKey);
+                pl.add("version", XMDSversion);
+
+                SOAPClient.invoke(url, "Schedule", pl, true, FetchSchedule_callBack);
+	}
+
+	FetchSchedule_callBack = function(r, a)
+	{
+		console.log("Schedule fetched. Parsing now.")
+		var result = a.getElementsByTagName("ScheduleXml")[0].innerHTML;
+		result = htmlDecode(result)
+		var parser = new DOMParser();
+                var xmlDoc = parser.parseFromString(result,"text/xml");
+		localStorage.setItem("Schedule", result);
+		defaultLayout = xmlDoc.getElementsByTagName("default")[0].getAttribute("file");
+		
+		var List =  xmlDoc.getElementsByTagName("file")
+		 // TODO
+                for (index = 0; index < List.length; ++index) // >
+                {
+			layouts[index] = []			
+		}
+		RenderLayout( defaultLayout )
+	}
+
+	playRegion = function (DOMnode)
+	{
+		console.log("Playing "+DOMnode.getAttribute('id'));
+		var regionID = DOMnode.getAttribute('id');
+		// renderMedia = media node id.
+		// renderMediaItem = media node id, image numbers and shit. 
+		var NextAvailable = false;
+		var Medias = DOMnode.getElementsByTagName("media");
+		var Media = Medias[ renderMedia[regionID] ];
+
+		if (renderMediaItem[regionID] == 0)
+		{ // first slide of a media type, clean it up!
+			 document.getElementById( regionID ).style.background = '';
+			 document.getElementById( regionID ).innerHTML = ''; 
+		}
+
+		if (Media.getAttribute('type') == "image")
+                {
+                	var fileName = 'media/'+Media.getElementsByTagName('options')[0].getElementsByTagName('uri')[ renderMediaItem[regionID] ].innerHTML;
+                        document.getElementById( regionID ).style.background = "url(data:image/jpeg;base64,"+localStorage.getItem(fileName)+")";
+                        document.getElementById( regionID ).style.backgroundSize = "cover";
+
+			if (Media.getElementsByTagName('options')[0].getElementsByTagName('uri')[ renderMediaItem[regionID] + 1 ])
+			{
+				NextAvailable = true;
+			}
+                }
+		else if (Media.getAttribute('type') == "text")
+                {
+                	document.getElementById( regionID ).innerHTML = Media.getElementsByTagName('raw')[0].getElementsByTagName('text')[ renderMediaItem[regionID] ].innerHTML.replace("<![CDATA[", "").replace("]]>", "");
+			document.getElementById( regionID ).style.verticalAlign = 'middle';
+			if (Media.getElementsByTagName('raw')[0].getElementsByTagName('text')[ renderMediaItem[regionID] + 1 ])
+			{
+				NextAvailable = true;
+			}
+                }
+                else if (Media.getAttribute('type') == "video")
+                {
+			document.getElementById( regionID ).innerHTML = '<video width="320" height="240" controls><source src="movie.mp4" type="video/mp4"></video>';
+                }
+                else {
+                        console.log('Unable to render type "'+ Media.getAttribute('type') +'"');
+                }
+		
+		if (NextAvailable)
+		{
+			renderMediaItem[regionID] = renderMediaItem[regionID] + 1;
+		}
+		else
+		{
+			renderMedia[regionID] = renderMedia[regionID] + 1;
+			renderMediaItem[regionID] = 0;
+		}
+		
+		if (Medias[ renderMedia[regionID] ] === undefined)
+		{
+			renderMedia[regionID] = 0;
+		}
+
+
+		// set new timer with new interval and prepare new renderMedia and renderMediaItem values for next run.
+		renderTimers[ regionID ] = setTimeout(function(regionID ) {
+                                                     	playRegion(regionID );
+                                                      }, Media.getAttribute('duration')+'000',  DOMnode);
+
+	}
+
+	RenderLayout = function( layoutID )
+	{
+
+		renderMedia = [];
+		renderMediaItem  = [];
+		// TODO: reset renderTimers
+		renderTimers = [];
+
+		var layoutXML = localStorage.getItem("layout/"+layoutID);
+		var parser = new DOMParser();
+                var xmlDoc = parser.parseFromString(layoutXML,"text/xml");
+
+		var layoutWidth = xmlDoc.getElementsByTagName("layout")[0].getAttribute('width');
+		var layoutHeight = xmlDoc.getElementsByTagName("layout")[0].getAttribute('height');
+		var ratioWidth = screen.width/layoutWidth;
+		var ratioHeight = screen.height/layoutHeight; 
+		console.log( "Starting render of layout "+layoutID+". Screen: "+ screen.width +"x"+screen.height+" Layout: "+layoutWidth+"x"+layoutHeight +" Ratio: w"+ratioWidth+" h"+ratioHeight );
+		document.getElementById("xiboStart").innerHTML  = "<div id='xiboRender' style='width:"+screen.width+"px;height:"+screen.height+"px;overflow:none;'></div>";	// blanking screen
+		var xiboRender = document.getElementById("xiboRender");
+		var bgcolor = xmlDoc.getElementsByTagName("layout")[0].getAttribute('bgcolor');
+		if (bgcolor)
+		{
+			document.getElementById("xiboRender").style.backgroundColor=bgcolor;
+			console.log("Background color '"+bgcolor+"'");
+		}
+		//return;
+
+		var regions = xmlDoc.getElementsByTagName("region");
+		
+		for (index = 0; index < regions.length;++index) // > nano fix
+		// xibo logic: reverse rendering 
+		//for (index = regions.length-1; index >= 0;--index)
+		{
+			var regionID = regions[index].getAttribute('id');
+			var regionTop = regions[index].getAttribute('top')*ratioHeight;
+ 			var regionLeft = regions[index].getAttribute('left')*ratioWidth;
+			var regionHeight = regions[index].getAttribute('height')*ratioHeight;
+			var regionWidth = regions[index].getAttribute('width')*ratioWidth;
+			var regionDiv = document.createElement('div');
+
+			console.log("Rendering "+regionID+" at "+regionLeft+"x"+regionTop+" Width:"+regionWidth+" Height:"+regionHeight);
+
+			regionDiv.setAttribute('id', regionID);
+			regionDiv.style.position = 'fixed';
+			regionDiv.style.top = regionTop+"px";
+			regionDiv.style.left = regionLeft+"px";
+			regionDiv.style.height = regionHeight+"px";
+			regionDiv.style.width = regionWidth+"px";
+			
+			renderMedia [ regionID ] = 0;
+			renderMediaItem [ regionID ] = 0;
+			renderTimers[ regionID ] = setTimeout(function(regionID, regionIndex) {
+       									playRegion(regionID, regions[index] );
+									}, 100,  regions[index]); 			
+
+	/*		var media = regions[index].getElementsByTagName("media");			
+			for (mindex=0; mindex < media.length;++mindex) // > nano fix
+			{
+				console.log(media[mindex].getAttribute('type'));
+				if (media[mindex].getAttribute('type') == "image")
+				{
+					var fileName = 'media/'+media[mindex].getElementsByTagName('options')[0].getElementsByTagName('uri')[0].innerHTML;
+					regionDiv.style.background = "url(data:image/jpeg;base64,"+localStorage.getItem(fileName)+")";
+					regionDiv.style.backgroundSize = "cover";
+				} //data:image/jpeg;base64,"+localStorage.getItem(fileName)+"
+				else if (media[mindex].getAttribute('type') == "text")
+				{
+					regionDiv.innerHTML = media[mindex].getElementsByTagName('raw')[0].getElementsByTagName('text')[0].innerHTML.replace("<![CDATA[", "").replace("]]>", "");
+				}
+				else if (media[mindex].getAttribute('type') == "video")
+				{
+				 //<video width="320" height="240" controls>
+				//	   <source src="movie.mp4" type="video/mp4">
+				//	 </video> 
+				}
+				else {
+					regionDiv.style.backgroundColor = 'red';
+					console.log('Unable to render type "'+ media[mindex].getAttribute('type') +'"');
+				}
+			}
+	*/		
+			// media [duration] [lkid] [schemaVersion] [userId]
+
+			// media [type=text] -> options -> direction [none]
+			//		     \-> raw -> text [html]
+
+			// media [type=ticker] -> options -> direction [up]
+			//				  \-> url
+			//				  \-> copyright
+			//				  \-> scrollSpeed [1]
+			//				  \-> updateInterval [30]
+			//				  \-> numitems
+			//				  \-> takeItemsFrom [start]
+			//				  \-> durationIsPerItem [0]
+			//				  \-> fitText [0]
+			//		       \-> raw -> template [CDATA with preg replace [Title] [Description] 
+
+			// media [type=image] -> options -> uri [9.jpg]
+			//		      \-> raw
+
+			// log media queue per region
+			// content in media queue
+			// just use timers, keep track of them per region to kill them if needed.
+
+
+
+			xiboRender.appendChild(regionDiv);
+
+
+		}
+	}
+	</script>
+</head>
+<body onload="RegisterDisplay()" style="margin: 0px; border 0px: padding: 0px;">
+<div id="xiboStart"  style="margin: 0px; border 0px: padding: 0px;" >
+Screen is loading...
+<div id="xiboStatus"></div>
+</div>
+</body>
+</html>
